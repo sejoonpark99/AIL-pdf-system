@@ -42,3 +42,4 @@ nul
 # Misc
 *.tsbuildinfo
 next-env.d.ts
+.claude/
