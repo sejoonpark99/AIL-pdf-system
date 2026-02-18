@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useCallback, useEffect } from "react"
+import { useState, useRef, useCallback, useEffect, useMemo } from "react"
 import { Document, Page, pdfjs } from "react-pdf"
 import "react-pdf/dist/Page/AnnotationLayer.css"
 import "react-pdf/dist/Page/TextLayer.css"
@@ -145,6 +145,36 @@ export default function PdfPageContent() {
   // Normalize text for fuzzy matching — strip special chars, collapse whitespace
   const normalize = (s: string): string =>
     s.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim()
+
+  // Memoized text renderer — only re-creates when highlights or currentPage change
+  const customTextRenderer = useMemo(() => {
+    return ({ str }: { str: string }) => {
+      const strNorm = normalize(str)
+      if (strNorm.length < 3) return str
+
+      const pageHighlights = highlights.filter(
+        h => !h.pageNumber || h.pageNumber === currentPage
+      )
+      if (pageHighlights.length === 0) return str
+
+      const isHighlighted = pageHighlights.some(h => {
+        const hNorm = normalize(h.text)
+        if (hNorm.includes(strNorm)) return true
+        if (strNorm.includes(hNorm)) return true
+        const hWords = hNorm.split(" ").filter(w => w.length >= 4)
+        const sWords = strNorm.split(" ").filter(w => w.length >= 4)
+        if (sWords.length > 0 && sWords.every(sw => hWords.some(hw => hw.includes(sw) || sw.includes(hw)))) {
+          return true
+        }
+        return false
+      })
+
+      if (isHighlighted) {
+        return `<mark style="background-color: rgba(239, 68, 68, 0.35); color: transparent; padding: 2px 0; border-radius: 2px;">${str}</mark>`
+      }
+      return str
+    }
+  }, [highlights, currentPage])
 
   const sendQuestion = useCallback(async () => {
     if (!inputMessage.trim()) return
@@ -383,36 +413,7 @@ export default function PdfPageContent() {
                     renderTextLayer={true}
                     renderAnnotationLayer={true}
                     className="pdf-page"
-                    customTextRenderer={({ str }) => {
-                      const strNorm = normalize(str)
-                      if (strNorm.length < 3) return str
-
-                      // Only match highlights for the current page (or all if no page specified)
-                      const pageHighlights = highlights.filter(
-                        h => !h.pageNumber || h.pageNumber === currentPage
-                      )
-                      if (pageHighlights.length === 0) return str
-
-                      const isHighlighted = pageHighlights.some(h => {
-                        const hNorm = normalize(h.text)
-                        // Fuzzy: normalized highlight contains this span
-                        if (hNorm.includes(strNorm)) return true
-                        // Or span contains the full highlight
-                        if (strNorm.includes(hNorm)) return true
-                        // Word-level: check if span shares significant words with highlight
-                        const hWords = hNorm.split(" ").filter(w => w.length >= 4)
-                        const sWords = strNorm.split(" ").filter(w => w.length >= 4)
-                        if (sWords.length > 0 && sWords.every(sw => hWords.some(hw => hw.includes(sw) || sw.includes(hw)))) {
-                          return true
-                        }
-                        return false
-                      })
-
-                      if (isHighlighted) {
-                        return `<mark style="background-color: rgba(239, 68, 68, 0.35); color: transparent; padding: 2px 0; border-radius: 2px;">${str}</mark>`
-                      }
-                      return str
-                    }}
+                    customTextRenderer={customTextRenderer}
                   />
                 </Document>
               </div>
@@ -430,7 +431,7 @@ export default function PdfPageContent() {
           </div>
 
           {/* Messages area */}
-          <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
+          <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4" style={{ scrollbarWidth: "thin", scrollbarColor: "rgba(255,255,255,0.2) transparent" }}>
             {messages.length === 0 && !currentThinking && !currentResponse && (
               <div className="text-center text-white/40 mt-8">
                 <p className="text-sm">Upload a PDF and ask questions about it</p>

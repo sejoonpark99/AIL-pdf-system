@@ -11,10 +11,30 @@ import asyncio
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
+import time
+from collections import defaultdict
+
 from fastapi import FastAPI, UploadFile, File, Form, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
+
+# Rate limiting: 10 requests per hour per IP
+RATE_LIMIT = 10
+RATE_WINDOW = 3600  # seconds
+_request_log: dict[str, list[float]] = defaultdict(list)
+
+
+def _check_rate_limit(ip: str) -> tuple[bool, int]:
+    """Returns (allowed, remaining) for the given IP."""
+    now = time.time()
+    timestamps = _request_log[ip]
+    # Prune old entries
+    _request_log[ip] = [t for t in timestamps if now - t < RATE_WINDOW]
+    if len(_request_log[ip]) >= RATE_LIMIT:
+        return False, 0
+    _request_log[ip].append(now)
+    return True, RATE_LIMIT - len(_request_log[ip])
 
 # Import business logic from main.py
 import main
@@ -52,6 +72,15 @@ async def pdf_ask(
     sdk_session_id: Optional[str] = Form(None),
 ):
     """SSE endpoint for asking questions about a PDF."""
+    client_ip = request.client.host if request.client else "unknown"
+    allowed, remaining = _check_rate_limit(client_ip)
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            content={"error": "Rate limit exceeded. Max 10 questions per hour."},
+            headers={"Retry-After": str(RATE_WINDOW)},
+        )
+
     file_content = None
     filename = None
     if file and file.filename:
