@@ -24,7 +24,11 @@ export default function RootLayout({
         className={`${inter.variable} antialiased`}
         suppressHydrationWarning
       >
-        {children}
+        <div className="flex h-screen w-screen overflow-hidden relative" style={{ background: '#111111' }}>
+          <main className="flex-1 flex flex-col overflow-hidden relative" style={{ background: '#111111' }}>
+            {children}
+          </main>
+        </div>
         <Toaster position="top-right" />
       </body>
     </html>
