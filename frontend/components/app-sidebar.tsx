@@ -64,9 +64,6 @@ export function AppSidebar() {
             className="flex items-center gap-3 flex-1 min-w-0 pl-2 pr-2 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:p-0 overflow-hidden"
             onClick={() => isMobile && setOpenMobile(!openMobile)}
           >
-            {/* Square gradient logo */}
-            <div className="h-8 w-8 rounded-md bg-gradient-to-br from-[#60a5fa] to-[#fbbf24] flex-shrink-0" />
-
             {/* Text layout - hidden when collapsed */}
             <div className="flex flex-col flex-1 min-w-0 group-data-[collapsible=icon]:!hidden group-data-[collapsible=icon]:!w-0 group-data-[collapsible=icon]:!h-0 overflow-hidden">
               <div className="flex items-center gap-2">

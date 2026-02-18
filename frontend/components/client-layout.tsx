@@ -1,6 +1,7 @@
 "use client"
 
 import { Toaster } from "sonner"
+import { LenisProvider } from "@/components/lenis-provider"
 import { SidebarProvider } from "@/components/ui/sidebar"
 import { AppSidebar } from "@/components/app-sidebar"
 import { FileText } from "lucide-react"
@@ -43,9 +44,11 @@ function SidebarContentWrapper({ children }: { children: React.ReactNode }) {
 
 export function ClientLayout({ children }: { children: React.ReactNode }) {
   return (
-    <SidebarProvider>
-      <SidebarContentWrapper>{children}</SidebarContentWrapper>
-      <Toaster position="bottom-right" duration={2000} />
-    </SidebarProvider>
+    <LenisProvider>
+      <SidebarProvider>
+        <SidebarContentWrapper>{children}</SidebarContentWrapper>
+        <Toaster position="top-center" duration={2000} />
+      </SidebarProvider>
+    </LenisProvider>
   )
 }

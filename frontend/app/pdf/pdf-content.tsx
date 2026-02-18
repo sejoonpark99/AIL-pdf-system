@@ -506,14 +506,18 @@ export default function PdfPageContent() {
 
           {/* Input */}
           <div className="px-4 py-3">
-            <div className="flex gap-2 items-center rounded-xl overflow-hidden px-3 py-2" style={{
+            <div className="flex gap-2 items-end rounded-xl overflow-hidden px-3 py-2" style={{
               background: "rgba(66, 66, 66, 0.7)",
               border: "1px solid rgba(255, 255, 255, 0.1)"
             }}>
               <textarea
                 placeholder={pdfFile ? "Ask a question about the PDF..." : "Upload a PDF first"}
                 value={inputMessage}
-                onChange={(e) => setInputMessage(e.target.value)}
+                onChange={(e) => {
+                  setInputMessage(e.target.value)
+                  e.target.style.height = "auto"
+                  e.target.style.height = Math.min(e.target.scrollHeight, 150) + "px"
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault()
