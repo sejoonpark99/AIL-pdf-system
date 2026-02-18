@@ -1,8 +1,8 @@
 """
 PDF Agent Module
 
-Uses the Claude Agent SDK with built-in tools for PDF analysis.
-https://platform.claude.com/docs/en/agent-sdk/overview
+Uses the Anthropic Python SDK for direct API streaming (lightweight, works on all hosts).
+Falls back to Claude Agent SDK locally if USE_AGENT_SDK=true is set.
 """
 
 import os
@@ -29,35 +29,30 @@ from skills import load_skills_from_directory
 # Load skills at startup
 _skills = load_skills_from_directory()
 
-# Import Claude Agent SDK
+# Check which backend to use
+USE_AGENT_SDK = os.environ.get("USE_AGENT_SDK", "").lower() == "true"
+
+# Import Anthropic SDK (lightweight, always available)
 try:
-    from claude_agent_sdk import query, ClaudeAgentOptions
-    AGENT_SDK_AVAILABLE = True
-    log.info("claude-agent-sdk imported successfully")
-except ImportError as e:
-    AGENT_SDK_AVAILABLE = False
-    query = None
-    ClaudeAgentOptions = None
-    log.error(f"claude-agent-sdk import failed: {e}")
+    import anthropic
+    ANTHROPIC_SDK_AVAILABLE = True
+    log.info("anthropic SDK imported successfully")
+except ImportError:
+    ANTHROPIC_SDK_AVAILABLE = False
+    log.warning("anthropic SDK not available")
 
-# Log bundled CLI status at startup
-def _check_bundled_cli():
+# Import Claude Agent SDK (heavy, optional — for local dev)
+AGENT_SDK_AVAILABLE = False
+query = None
+ClaudeAgentOptions = None
+
+if USE_AGENT_SDK:
     try:
-        import claude_agent_sdk
-        sdk_dir = Path(claude_agent_sdk.__file__).parent
-        cli_name = "claude.exe" if platform.system() == "Windows" else "claude"
-        bundled_path = sdk_dir / "_bundled" / cli_name
-        log.info(f"SDK version: {getattr(claude_agent_sdk, '__version__', 'unknown')}")
-        log.info(f"SDK location: {sdk_dir}")
-        log.info(f"Bundled CLI path: {bundled_path}")
-        log.info(f"Bundled CLI exists: {bundled_path.exists()}")
-        if bundled_path.exists():
-            log.info(f"Bundled CLI size: {bundled_path.stat().st_size} bytes")
-    except Exception as e:
-        log.warning(f"Could not check bundled CLI: {e}")
-
-if AGENT_SDK_AVAILABLE:
-    _check_bundled_cli()
+        from claude_agent_sdk import query, ClaudeAgentOptions
+        AGENT_SDK_AVAILABLE = True
+        log.info("claude-agent-sdk imported successfully (USE_AGENT_SDK=true)")
+    except ImportError as e:
+        log.warning(f"claude-agent-sdk not available, falling back to direct API: {e}")
 
 
 # ============================================================================
@@ -77,35 +72,99 @@ Format your responses in markdown when appropriate.
 
 
 # ============================================================================
-# PDF STREAMING HANDLER
+# CONVERSATION HISTORY (simple in-memory store for session continuity)
 # ============================================================================
 
-async def stream_pdf_response(
+_conversations: dict[str, list[dict]] = {}
+
+
+# ============================================================================
+# DIRECT ANTHROPIC API STREAMING (lightweight — works everywhere)
+# ============================================================================
+
+async def _stream_anthropic_direct(
     message: str,
     session_id: Optional[str] = None
 ) -> AsyncGenerator[dict, None]:
-    """
-    Stream responses from Claude Agent SDK for PDF analysis.
-    Includes thinking/reasoning events for transparency.
-    """
-    if not AGENT_SDK_AVAILABLE:
-        log.error("stream_pdf_response called but claude-agent-sdk is not available")
-        yield {"type": "error", "error": "claude-agent-sdk not installed. Run: pip install claude-agent-sdk"}
-        return
-
+    """Stream responses using the Anthropic Python SDK directly."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        log.error("ANTHROPIC_API_KEY not set in environment")
         yield {"type": "error", "error": "ANTHROPIC_API_KEY not configured"}
         return
 
+    model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+    pdf_skill = _skills.get("pdf_analysis")
+    system_prompt = PDF_SYSTEM_PROMPT + ("\n\n" + pdf_skill if pdf_skill else "")
+
+    # Build message history for session continuity
+    if session_id and session_id in _conversations:
+        messages = _conversations[session_id].copy()
+        messages.append({"role": "user", "content": message})
+    else:
+        messages = [{"role": "user", "content": message}]
+
+    log.info(f"[pdf-agent] Direct API call — model={model}, messages={len(messages)}")
+
     try:
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
-        pdf_skill = _skills.get("pdf_analysis")
-        full_pdf_prompt = PDF_SYSTEM_PROMPT + ("\n\n" + pdf_skill if pdf_skill else "")
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+        full_content = ""
 
-        log.info(f"[pdf-agent] Starting query — model={model}, session_id={session_id}, message={message[:80]}...")
+        async with client.messages.stream(
+            model=model,
+            max_tokens=8192,
+            system=system_prompt,
+            messages=messages,
+        ) as stream:
+            async for event in stream:
+                if event.type == "content_block_delta":
+                    if hasattr(event.delta, "text"):
+                        text = event.delta.text
+                        full_content += text
+                        yield {"type": "text", "content": text}
 
+        # Generate a session ID if we don't have one
+        if not session_id:
+            import uuid
+            session_id = str(uuid.uuid4())
+
+        # Store conversation history
+        messages.append({"role": "assistant", "content": full_content})
+        _conversations[session_id] = messages
+
+        # Prune old conversations (keep max 50)
+        if len(_conversations) > 50:
+            oldest = list(_conversations.keys())[0]
+            del _conversations[oldest]
+
+        log.info(f"[pdf-agent] Direct API complete — length={len(full_content)}, session={session_id}")
+        yield {"type": "complete", "content": full_content, "session_id": session_id}
+
+    except Exception as e:
+        log.error(f"[pdf-agent] Direct API error: {type(e).__name__}: {e}")
+        yield {"type": "error", "error": str(e)}
+
+
+# ============================================================================
+# CLAUDE AGENT SDK STREAMING (heavy — for local dev only)
+# ============================================================================
+
+async def _stream_agent_sdk(
+    message: str,
+    session_id: Optional[str] = None
+) -> AsyncGenerator[dict, None]:
+    """Stream responses using the Claude Agent SDK (spawns subprocess)."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        yield {"type": "error", "error": "ANTHROPIC_API_KEY not configured"}
+        return
+
+    model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+    pdf_skill = _skills.get("pdf_analysis")
+    full_pdf_prompt = PDF_SYSTEM_PROMPT + ("\n\n" + pdf_skill if pdf_skill else "")
+
+    log.info(f"[pdf-agent] Agent SDK query — model={model}, session_id={session_id}")
+
+    try:
         options = ClaudeAgentOptions(
             model=model,
             allowed_tools=["WebSearch", "WebFetch", "Read", "Glob", "Grep"],
@@ -115,43 +174,32 @@ async def stream_pdf_response(
 
         if session_id:
             options.resume = session_id
-            log.info(f"[pdf-agent] Resuming session: {session_id}")
 
         full_content = ""
         new_session_id = None
 
-        loop = asyncio.get_running_loop()
-        log.info(f"[pdf-agent] Event loop type: {type(loop).__name__}")
-        log.info("[pdf-agent] Calling query() — spawning Claude Code subprocess...")
-
         async for message_event in query(prompt=message, options=options):
             event_type = getattr(message_event, 'type', None)
             subtype = getattr(message_event, 'subtype', None)
-            log.debug(f"[pdf-agent] Event: type={event_type}, subtype={subtype}")
 
             if event_type == "system" and subtype == "init":
                 new_session_id = getattr(message_event, 'session_id', None)
-                log.info(f"[pdf-agent] Session initialized: {new_session_id}")
                 continue
 
-            # Handle thinking/reasoning events
             if event_type == "assistant" and subtype == "thinking":
                 thinking_content = getattr(message_event, 'content', '')
                 if thinking_content:
                     yield {"type": "thinking", "content": thinking_content}
 
-            # Handle assistant text messages
             elif event_type == "assistant" and subtype == "text":
                 content = getattr(message_event, 'content', '')
                 if content:
                     full_content += content
                     yield {"type": "text", "content": content}
 
-            # Handle tool use events
             elif event_type == "tool_use":
                 tool_name = getattr(message_event, 'tool_name', getattr(message_event, 'name', 'Unknown'))
                 tool_input = getattr(message_event, 'tool_input', getattr(message_event, 'input', ''))
-                log.info(f"[pdf-agent] Tool call: {tool_name}")
                 if isinstance(tool_input, dict):
                     import json
                     tool_input = json.dumps(tool_input)
@@ -171,14 +219,37 @@ async def stream_pdf_response(
 
             elif event_type == "error":
                 error_msg = getattr(message_event, 'error', getattr(message_event, 'message', 'Unknown error'))
-                log.error(f"[pdf-agent] Error event from SDK: {error_msg}")
                 yield {"type": "error", "error": str(error_msg)}
                 return
 
-        log.info(f"[pdf-agent] Stream complete — response length={len(full_content)}, session_id={new_session_id}")
+        log.info(f"[pdf-agent] Agent SDK complete — length={len(full_content)}, session={new_session_id}")
         yield {"type": "complete", "content": full_content, "session_id": new_session_id}
 
     except Exception as e:
-        log.error(f"[pdf-agent] Exception in stream_pdf_response: {type(e).__name__}: {e}")
+        log.error(f"[pdf-agent] Agent SDK error: {type(e).__name__}: {e}")
         log.error(f"[pdf-agent] Traceback:\n{traceback.format_exc()}")
         yield {"type": "error", "error": f"{type(e).__name__}: {e}"}
+
+
+# ============================================================================
+# PUBLIC ENTRY POINT — auto-selects backend
+# ============================================================================
+
+async def stream_pdf_response(
+    message: str,
+    session_id: Optional[str] = None
+) -> AsyncGenerator[dict, None]:
+    """
+    Stream PDF analysis responses.
+    Uses Agent SDK if USE_AGENT_SDK=true and available, otherwise direct Anthropic API.
+    """
+    if USE_AGENT_SDK and AGENT_SDK_AVAILABLE:
+        log.info("[pdf-agent] Using Claude Agent SDK backend")
+        async for event in _stream_agent_sdk(message, session_id):
+            yield event
+    elif ANTHROPIC_SDK_AVAILABLE:
+        log.info("[pdf-agent] Using direct Anthropic API backend")
+        async for event in _stream_anthropic_direct(message, session_id):
+            yield event
+    else:
+        yield {"type": "error", "error": "No AI backend available. Install anthropic: pip install anthropic"}
